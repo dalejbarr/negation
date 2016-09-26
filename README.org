@@ -1,0 +1,831 @@
+#+TITLE: Negation experiment
+#+PROPERTY: header-args:R :session *R* :colnames yes :noweb yes
+
+* Preprocess																											 :noexport:
+
+- This little script copies the data from a mysql database server to a
+  sqlite database for easier reproducibility.
+
+#+BEGIN_SRC R :eval never
+  library(dplyr)
+
+  con_mysql <- src_mysql("NegPre1", user=NULL, password=NULL)
+  con_sqlite <- src_sqlite("raw_data/Experiment_Data.db", create=TRUE)
+
+  obswin <- tbl(con_mysql, "_ObsWindow") %>% collect(n = Inf)
+  tdata <- tbl(con_mysql, "_TrialData") %>% collect(n = Inf)
+
+  eye <- tbl(con_mysql, "_Eye") %>% collect(n = Inf)
+  pog <- tbl(con_mysql, "_eyeAOIa") %>% collect(n = Inf)
+
+  copy_to(con_sqlite, obswin, "ObsWindow", temporary=FALSE)
+  copy_to(con_sqlite, tdata, "TrialData", temporary=FALSE)
+  copy_to(con_sqlite, eye, "Eye", temporary=FALSE)
+  copy_to(con_sqlite, pog, "POG", temporary=FALSE)
+#+END_SRC
+
+
+* Preprocess Eye Data																							 :noexport:
+
+- don't need to run this... it was run one time to create the tables
+  =POG_exproffset= and =POG_negonset= in Experiment_Data.db
+
+#+BEGIN_SRC R :eval never
+  library(dplyr)
+
+  con <- src_sqlite("raw_data/Experiment_Data.db", create=FALSE)
+
+  pog <- tbl(con, "POG") %>%
+      rename(ms=msHabla) %>% filter(ms>=-500, ms<=2500) %>%
+      collect(n = Inf) %>%
+      mutate(ID=factor(ObjID, levels=c("unme", "comp", "negt", "blnk"))) %>%
+      select(RespID, ms, ID) %>%
+      arrange(RespID, ms) %>%
+      group_by(RespID) %>%
+      mutate(FrameID=row_number()) %>%
+      filter(FrameID<=1500)
+
+  copy_to(con, pog, "POG_exproffset", temporary=FALSE)
+
+  pog_pre <- tbl(con, "ObsWindow") %>% collect(n = Inf) %>%
+      mutate(NegOn=NnOff-NegOn) %>%
+      select(RespID, NegOn) %>%
+      inner_join(tbl(con, "POG") %>% collect(n = Inf)) %>%
+      mutate(ms=msHabla + NegOn,
+             ID=factor(ObjID, levels=c("unme", "comp", "negt", "blnk"))) %>%
+      filter(ms>=-1000 & msHabla<=0 & ms<1000) %>%
+      select(RespID, ms, ID)
+
+  copy_to(con, pog_pre, "POG_negonset", temporary=FALSE)        
+#+END_SRC
+
+
+* Selection data
+	:PROPERTIES:
+	:header-args:R: :tangle scripts/selection_data.R
+	:END:
+
+** Setup
+
+- just import the selection info from the database
+
+#+BEGIN_SRC R :results silent
+  library(dplyr)
+
+  con <- src_sqlite("raw_data/Experiment_Data.db", create=FALSE)
+
+  obswin <- tbl(con, "ObsWindow") %>% collect(n = Inf)
+  tdata <- tbl(con, "TrialData") %>% collect(n = Inf)
+
+  obsdat <- tdata %>% inner_join(obswin, "RespID") %>%
+      mutate(CritSel=ObjSel=="unme",
+             PGd=Cond=="PG",
+             CGd=Cond=="CG",
+             PG=PGd-mean(PGd), CG=CGd-mean(CGd)) %>%
+      select(SubjID, ItemID, RespID, PG, CG, Cond, RT=rtArtOn,
+             CritSel, ObjSel)
+#+END_SRC
+
+** Selection Table
+
+#+BEGIN_SRC R 
+  cond_lookup <- data_frame(Cond=c("CG", "PG", "NG"),
+                            Condition=c("Common Ground",
+                                "Privileged Ground",
+                                "Control"))
+
+  obsel_lookup <- data_frame(ObjSel=c("unme", "comp", "negt"),
+                             Alternative=c("Unnamed",
+                                 "Critical",
+                                 "Negated"))
+
+  inner_join(obsdat, cond_lookup) %>%
+      inner_join(obsel_lookup) %>%
+      group_by(Condition, Alternative) %>%
+      summarize(Y=n()) %>%
+      inner_join(obsdat %>% inner_join(cond_lookup) %>%
+                     inner_join(obsel_lookup) %>%
+                     group_by(Condition) %>%
+                     summarize(N=n())) %>%
+      mutate(p=round(Y/N, 3))
+#+END_SRC
+
+#+RESULTS:
+| Condition         | Alternative |   Y |   N |     p |
+|-------------------+-------------+-----+-----+-------|
+| Common Ground     | Critical    |  23 | 144 |  0.16 |
+| Common Ground     | Negated     |   5 | 144 | 0.035 |
+| Common Ground     | Unnamed     | 116 | 144 | 0.806 |
+| Control           | Critical    |  71 | 144 | 0.493 |
+| Control           | Negated     |   1 | 144 | 0.007 |
+| Control           | Unnamed     |  72 | 144 |   0.5 |
+| Privileged Ground | Critical    |  62 | 144 | 0.431 |
+| Privileged Ground | Negated     |   1 | 144 | 0.007 |
+| Privileged Ground | Unnamed     |  81 | 144 | 0.562 |
+
+** Analysis
+
+#+BEGIN_SRC R :exports results :results output
+  library(lme4)
+
+  obsdat.glmer <-
+      glmer(CritSel ~ PG + CG + (PG + CG | SubjID) + (PG + CG | ItemID),
+            data=obsdat, family=binomial(link=logit),
+            control=glmerControl(optimizer="bobyqa"))
+
+  obsdat.glmer.noME <-
+      glmer(CritSel ~ (PG + CG | SubjID) + (PG + CG | ItemID),
+           data=obsdat, family=binomial(link=logit),
+           control=glmerControl(optimizer="bobyqa"))
+
+  obsdat.glmer.noCG <-
+      glmer(CritSel ~ PG + (PG + CG | SubjID) + (PG + CG | ItemID),
+            data=obsdat, family=binomial(link=logit),
+            control=glmerControl(optimizer="bobyqa"))
+
+  obsdat.glmer.noPG <-
+      glmer(CritSel ~ CG + (PG + CG | SubjID) + (PG + CG | ItemID),
+            data=obsdat, family=binomial(link=logit),
+            control=glmerControl(optimizer="bobyqa"))
+
+  summary(obsdat.glmer)
+  anova(obsdat.glmer, obsdat.glmer.noME)
+  anova(obsdat.glmer.noCG, obsdat.glmer)
+  anova(obsdat.glmer.noPG, obsdat.glmer)
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+Generalized linear mixed model fit by maximum likelihood (Laplace
+  Approximation) [glmerMod]
+ Family: binomial  ( logit )
+Formula: CritSel ~ PG + CG + (PG + CG | SubjID) + (PG + CG | ItemID)
+   Data: obsdat
+Control: glmerControl(optimizer = "bobyqa")
+
+     AIC      BIC   logLik deviance df.resid 
+   500.3    561.3   -235.1    470.3      417 
+
+Scaled residuals: 
+    Min      1Q  Median      3Q     Max 
+-3.0824 -0.7806  0.1722  0.7048  1.8857 
+
+Random effects:
+ Groups Name        Variance Std.Dev. Corr       
+ SubjID (Intercept) 1.79640  1.3403              
+        PG          3.12522  1.7678   0.94       
+        CG          8.40399  2.8990   0.95  0.78 
+ ItemID (Intercept) 0.04004  0.2001              
+        PG          0.02442  0.1563   -1.00      
+        CG          0.31455  0.5609   -1.00  1.00
+Number of obs: 432, groups:  SubjID, 24; ItemID, 18
+
+Fixed effects:
+            Estimate Std. Error z value Pr(>|z|)   
+(Intercept)   1.0564     0.3734   2.829  0.00467 **
+PG            0.3040     0.4582   0.664  0.50703   
+CG            2.8627     0.9323   3.070  0.00214 **
+---
+Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+
+Correlation of Fixed Effects:
+   (Intr) PG   
+PG 0.578       
+CG 0.853  0.480
+Data: obsdat
+Models:
+obsdat.glmer.noME: CritSel ~ (PG + CG | SubjID) + (PG + CG | ItemID)
+obsdat.glmer: CritSel ~ PG + CG + (PG + CG | SubjID) + (PG + CG | ItemID)
+                  Df    AIC    BIC  logLik deviance  Chisq Chi Df Pr(>Chisq)
+obsdat.glmer.noME 13 514.05 566.94 -244.03   488.05                         
+obsdat.glmer      15 500.26 561.28 -235.13   470.26 17.798      2  0.0001365
+                     
+obsdat.glmer.noME    
+obsdat.glmer      ***
+---
+Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+Data: obsdat
+Models:
+obsdat.glmer.noCG: CritSel ~ PG + (PG + CG | SubjID) + (PG + CG | ItemID)
+obsdat.glmer: CritSel ~ PG + CG + (PG + CG | SubjID) + (PG + CG | ItemID)
+                  Df    AIC    BIC  logLik deviance  Chisq Chi Df Pr(>Chisq)
+obsdat.glmer.noCG 14 511.63 568.59 -241.81   483.63                         
+obsdat.glmer      15 500.26 561.28 -235.13   470.26 13.375      1  0.0002551
+                     
+obsdat.glmer.noCG    
+obsdat.glmer      ***
+---
+Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+Data: obsdat
+Models:
+obsdat.glmer.noPG: CritSel ~ CG + (PG + CG | SubjID) + (PG + CG | ItemID)
+obsdat.glmer: CritSel ~ PG + CG + (PG + CG | SubjID) + (PG + CG | ItemID)
+                  Df    AIC    BIC  logLik deviance  Chisq Chi Df Pr(>Chisq)
+obsdat.glmer.noPG 14 498.69 555.65 -235.34   470.69                         
+obsdat.glmer      15 500.26 561.28 -235.13   470.26 0.4333      1     0.5104
+#+end_example
+
+* Common functions for plotting
+
+** Bootstrap for plotting
+
+#+name: bootfns
+#+BEGIN_SRC R
+	boot_by_subject <- function(x, subj) {
+			subj %>% mutate(NSubjID=sample(SubjID, length(SubjID), replace=TRUE)) %>%
+					inner_join(x, by=c("NSubjID"="SubjID")) %>% select(-NSubjID)
+	}
+
+	aggup <- function(x, full_table=FALSE) {
+		 res <- x %>% group_by(Cond, bin, ID) %>%
+					summarize(p=mean(p, na.rm=TRUE))
+		 if (full_table) {
+				 res %>% ungroup()
+		 } else {
+				 res %>% `[[`("p")
+		 }
+	}
+
+	aggup_lr <- function(x, full_table=FALSE) {
+		 res <- x %>% group_by(Cond, bin) %>%
+					summarize(`Log Ratio`=mean(`Log Ratio`, na.rm=TRUE))
+		 if (full_table) {
+				 res %>% ungroup()
+		 } else {
+				 res %>% `[[`("Log Ratio")
+		 }
+	}
+
+	# use pretty condition labels and ID labels
+	prettify <- function(x, xlab="Time from Expression Offset (ms)") {
+			cond_pretty <- data_frame(Cond=c("CG", "PG", "NG"),
+																Condition=c("One Speaker, Two Precedents",
+																		"Two Speakers, Two Precedents",
+																		"One Speaker, One Precedent"))
+			flvl = c("unme", "comp", "negt", "blnk")
+			id_pretty <- data_frame(ID=flvl,
+															`Point of Gaze`=c("Unmentioned",
+																	"Critical", "Negated", "Blank"))
+			ff <- x %>% inner_join(cond_pretty, by="Cond") %>%
+					inner_join(id_pretty, by="ID") %>% select(-Cond, -ID) %>%
+					rename(`Proportion Gaze`=p) 
+			colnames(ff) <- sub("bin", xlab, colnames(ff))
+			return(ff)
+	}
+#+END_SRC
+
+** Load data and put into bins
+
+*** By Subject
+
+#+name: binifysubj
+#+BEGIN_SRC R
+  con <- src_sqlite("raw_data/Experiment_Data.db")
+
+  tdata <- tbl(con, "TrialData") %>% collect(n = Inf) %>%
+      select(RespID, SubjID, Cond)
+
+  pog <- tbl(con, "POG_exproffset") %>% collect(n = Inf) %>%
+      filter(ms>=0, ms<=2500) %>%
+      mutate(bin=floor((ms+25)/50)*50)
+
+  # the following lines divide the data into bins
+  # aggregated up to the Subject level
+  dat <- tdata %>% inner_join(pog, by="RespID") %>%
+      group_by(SubjID, Cond, bin, ID) %>%
+      summarize(Y=n()) %>%
+          right_join(expand(tdata %>%
+                                inner_join(pog, by="RespID"),
+                            SubjID, Cond, bin, ID))
+  dat$Y <- with(dat, ifelse(is.na(Y), 0, Y))
+
+  dat_subj <- dat %>% group_by(SubjID, Cond, bin) %>%
+      summarize(N=sum(Y)) %>% ungroup() %>% inner_join(dat) %>%
+      mutate(p=ifelse(N==0, NA, Y/N))
+#+END_SRC
+
+*** By Item
+
+#+name: binifyitem
+#+BEGIN_SRC R
+  con <- src_sqlite("raw_data/Experiment_Data.db")
+
+  tdata <- tbl(con, "TrialData") %>% collect(n = Inf) %>%
+      select(RespID, ItemID, Cond)
+
+  pog <- tbl(con, "POG_exproffset") %>% collect(n = Inf) %>%
+      filter(ms>=0, ms<=2500) %>%
+      mutate(bin=floor((ms+25)/50)*50)
+
+  # the following lines divide the data into bins
+  # aggregated up to the Subject level
+  dat <- tdata %>% inner_join(pog, by="RespID") %>%
+      group_by(ItemID, Cond, bin, ID) %>%
+      summarize(Y=n()) %>%
+          right_join(expand(tdata %>%
+                                inner_join(pog, by="RespID"),
+                            ItemID, Cond, bin, ID))
+  dat$Y <- with(dat, ifelse(is.na(Y), 0, Y))
+
+  dat_item <- dat %>% group_by(ItemID, Cond, bin) %>%
+      summarize(N=sum(Y)) %>% ungroup() %>% inner_join(dat) %>%
+      mutate(p=ifelse(N==0, NA, Y/N))
+#+END_SRC
+
+
+* Plot Eye Data from Negation Onset
+
+#+HEADER: :file negonset.pdf :width 12 :height 3.5
+#+BEGIN_SRC R :exports results :results output graphics 
+	<<bootfns>>
+
+	library(dplyr)
+	library(tidyr)
+
+	con <- src_sqlite("raw_data/Experiment_Data.db")
+
+	tdata <- tbl(con, "TrialData") %>% collect(n = Inf) %>%
+			select(RespID, SubjID, Cond)
+
+	pog <- tbl(con, "POG_negonset") %>% collect(n = Inf) %>%
+			filter(ms>0) %>%
+			mutate(bin=floor((ms+25)/50)*50)
+
+	# count proportion of trials contributing to each datapoint
+	# (because trials dropout depending on where offset of expression
+	# falls)
+	pog_left <- pog %>%
+			inner_join(select(tdata, RespID, SubjID, Cond), "RespID") %>%
+			select(SubjID, Cond, bin) %>% distinct() %>%
+			group_by(Cond, bin) %>% summarize(N=n()) %>%
+			ungroup() 
+
+	pog_left2 <- pog_left %>%
+			group_by(Cond) %>%
+			summarize(maxN=max(N)) %>%
+			ungroup() %>%
+			inner_join(pog_left, "Cond") %>%
+			mutate(pLeft=N/maxN) %>%
+			select(-maxN, -N)
+
+	# the following lines divide the data into bins
+	# aggregated up to the Subject level
+	dat <- tdata %>% inner_join(pog, "RespID") %>%
+		group_by(SubjID, Cond, bin, ID) %>%
+		summarize(Y=n()) %>%
+		right_join(expand(tdata %>%
+												inner_join(pog, by = "RespID"),
+											SubjID, Cond, bin, ID),
+							 by = c("SubjID", "Cond", "bin", "ID"))
+
+	dat$Y <- with(dat, ifelse(is.na(Y), 0, Y))
+
+	dat_plot <- dat %>% group_by(SubjID, Cond, bin) %>%
+			summarize(N=sum(Y)) %>% ungroup() %>%
+			inner_join(dat, c("SubjID", "Cond", "bin")) %>%
+			mutate(p=ifelse(N==0, NA, Y/N))
+
+	subj <- dat_plot %>% select(SubjID) %>% distinct()
+
+	# make sure that there are the same number of bins per condition per subject
+	if (dat_plot %>% group_by(SubjID, Cond) %>% 
+			summarize(n=n()) %>% ungroup() %>%
+			select(n) %>% distinct() %>% nrow() %>% `!=`(1)) {
+			stop("error: need to have same # bins per subject/cond")
+	} else {}
+
+	boot.mx <- replicate(10000, dat_plot %>% boot_by_subject(subj) %>% aggup())
+	boot.ci <- apply(boot.mx, 1, quantile, probs=c(.025, .975))
+
+	## dat_agg <- dat_plot %>% aggup_lr(TRUE)
+	dat_agg <- dat_plot %>% aggup(TRUE)
+	dat_agg$pmin <- boot.ci["2.5%",]
+	dat_agg$pmax <- boot.ci["97.5%",]
+
+	dat_agg2 <- dat_agg %>%
+			inner_join(pog_left2) %>%
+			prettify("Time from Negation Onset (ms)") %>% filter(`Point of Gaze`!="Blank")
+
+	library(ggplot2)
+	ggplot(dat_agg2, aes(x=`Time from Negation Onset (ms)`,
+											 y=`Proportion Gaze`,
+											 colour=`Point of Gaze`)) + geom_line(aes(alpha=pLeft)) + 
+											 geom_point(aes(shape=`Point of Gaze`, alpha=pLeft)) +
+											 geom_ribbon(aes(ymin=pmin, ymax=pmax, fill=`Point of Gaze`),
+																	 alpha=.1, colour=NA) +
+											 facet_wrap(~Condition) +                                     
+											 theme(legend.position="top") +
+											 coord_cartesian(ylim=c(0, .45)) +
+											 guides(alpha=FALSE)
+#+END_SRC
+
+#+RESULTS:
+[[file:negonset.pdf]]
+
+
+* Plot Eye Data from Expression Offset
+
+#+HEADER: :file exproffset.pdf :width 12 :height 4
+#+BEGIN_SRC R :exports results :results output graphics 
+  library(dplyr)
+  library(tidyr)
+
+  <<bootfns>>
+
+  <<binifysubj>>
+
+  dat_plot <- dat_subj; rm(dat_subj)
+  subj <- dat_plot %>% select(SubjID) %>% distinct()
+
+  # make sure that there are the same number of bins per condition per subject
+  if (dat_plot %>% group_by(SubjID, Cond) %>% 
+      summarize(n=n()) %>% ungroup() %>%
+      select(n) %>% distinct() %>% nrow() %>% `!=`(1)) {
+      stop("error: need to have same # bins per subject/cond")
+  } else {}
+
+  boot.mx <- replicate(10000, dat_plot %>% boot_by_subject(subj) %>% aggup())
+  boot.ci <- apply(boot.mx, 1, quantile, probs=c(.025, .975))
+
+  dat_agg <- dat_plot %>% aggup(TRUE)
+  dat_agg$pmin <- boot.ci["2.5%",]
+  dat_agg$pmax <- boot.ci["97.5%",]
+
+  dat_agg2 <- dat_agg %>%
+      prettify() %>% filter(`Point of Gaze`!="Blank")
+
+  library(ggplot2)
+  ggplot(dat_agg2, aes(x=`Time from Expression Offset (ms)`,
+                       y=`Proportion Gaze`,
+                       colour=`Point of Gaze`)) + geom_line() + 
+                       geom_point(aes(shape=`Point of Gaze`)) +
+                       geom_ribbon(aes(ymin=pmin, ymax=pmax, fill=`Point of Gaze`),
+                                   alpha=.1, colour=NA) +
+                       facet_wrap(~Condition) +                                     
+                       theme(legend.position="top") +
+                       coord_cartesian(ylim=c(0, .8)) +
+                       guides(alpha=FALSE)
+#+END_SRC
+
+#+RESULTS:
+[[file:exproffset.pdf]]
+
+* Plot Log Ratio
+
+#+HEADER: :file logratio.pdf :width 8 :height 4
+#+BEGIN_SRC R :exports results :results output graphics
+  <<bootfns>>
+
+  library(dplyr)
+  library(tidyr)
+
+  con <- src_sqlite("raw_data/Experiment_Data.db")
+
+  tdata <- tbl(con, "TrialData") %>% collect(n = Inf) %>%
+      select(RespID, SubjID, Cond)
+
+  pog <- tbl(con, "POG_exproffset") %>% collect(n = Inf) %>%
+      filter(ms>0) %>%
+      mutate(bin=floor((ms+25)/50)*50)
+
+  # the following lines divide the data into bins
+  # aggregated up to the Subject level
+  dat <- tdata %>% inner_join(pog, by="RespID") %>%
+      group_by(SubjID, Cond, bin, ID) %>%
+      summarize(Y=n()) %>%
+          right_join(expand(tdata %>%
+                                inner_join(pog, by="RespID"),
+                            SubjID, Cond, bin, ID))
+  dat$Y <- with(dat, ifelse(is.na(Y), 0, Y))
+
+  dat_plot <- dat %>% group_by(SubjID, Cond, bin) %>%
+      summarize(N=sum(Y)) %>% ungroup() %>% inner_join(dat) %>%
+      mutate(p=ifelse(N==0, NA, Y/N)) %>%
+      filter(ID=="unme" | ID=="comp") %>%
+      select(SubjID, Cond, bin, Y, ID) %>%
+      spread(ID, Y) %>% mutate(`Log Ratio`=log((unme + .5) / (comp + .5)))
+
+  subj <- dat_plot %>% select(SubjID) %>% distinct()
+
+  # make sure that there are the same number of bins per condition per subject
+  if (dat_plot %>% group_by(SubjID, Cond) %>% 
+      summarize(n=n()) %>% ungroup() %>%
+      select(n) %>% distinct() %>% nrow() %>% `!=`(1)) {
+      stop("error: need to have same # bins per subject/cond")
+  } else {}
+
+  boot.mx <- replicate(10000, dat_plot %>% boot_by_subject(subj) %>% aggup_lr())
+  boot.ci <- apply(boot.mx, 1, quantile, probs=c(.025, .975))
+
+  dat_agg <- dat_plot %>% aggup_lr(TRUE)
+  dat_agg$pmin <- boot.ci["2.5%",]
+  dat_agg$pmax <- boot.ci["97.5%",]
+
+  cond_lookup <- data_frame(Cond=c("CG", "PG", "NG"),
+                            Condition=c("Common Ground", "Privileged Ground",
+                                "Control"))
+
+  dat_agg2 <- dat_agg %>%
+      inner_join(cond_lookup) %>% select(-Cond) %>%
+      rename(`Time from Expression Offset (ms)`=bin)
+
+  library(ggplot2)
+  ggplot(dat_agg2, aes(x=`Time from Expression Offset (ms)`,
+                       y=`Log Ratio`,
+                       colour=`Condition`)) + geom_line() + 
+                       geom_point(aes(shape=`Condition`)) +
+                       geom_ribbon(aes(ymin=pmin, ymax=pmax, fill=`Condition`),
+                                   alpha=.1, colour=NA) +                            
+                       theme(legend.position="top") 
+#+END_SRC
+
+#+RESULTS:
+[[file:logratio.pdf]]
+
+* Cluster randomization analysis
+
+** Common functions
+
+#+name: clustfns
+#+BEGIN_SRC R
+  getClust <- function(x) {
+      ff <- x %>% mutate(cl=(p<.05)*sign(F))
+      ff.runs <- rle(ff$cl)
+      nruns <- length(ff.runs$lengths)
+      clust.ix <- which(ff.runs$values!=0)
+      if (length(clust.ix)) {
+          res <- lapply(clust.ix, function(ix) {
+              if (ix>1) {
+                  t0 <- sum(ff.runs$length[1:(ix-1)]) + 1
+              } else {
+                  t0 <- 1
+              }
+              t1 <- t0 + ff.runs$lengths[ix] - 1
+              csum <- sum(ff$F[t0:t1])
+              data.frame(t0=t0, t1=t1, csum=csum)
+          })
+          res <- do.call("rbind", res)
+      } else { # do something for zero case
+          res <- data.frame(t0=NA, t1=NA, csum=0)
+      }
+      res
+  }
+
+  # generic t-test
+  ttest1 <- function(x) {
+      lvls <- unique(x$Cond2)
+      ff <- x %>% 
+          spread(Cond2, eff)
+      vec <- ff[[lvls[1]]] - ff[[lvls[2]]]
+      vmean <- mean(vec)
+      serr <- sd(vec)/sqrt(length(vec))
+      tobs <- vmean / serr
+      data_frame(tobs=tobs, pval=2*(1-pt(abs(tobs), 23)))    
+  }
+
+  flip1 <- function(x) {
+      xx <- mutate(x, CondNew=Cond2)
+      if (sample(c(TRUE, FALSE), 1)) {
+          xx$CondNew <- rev(xx$CondNew)
+      } else {}
+      return(xx)
+  }
+
+  permuteOnce1 <- function(x, unitcond) {
+      unitcond %>% group_by(UnitID) %>%
+          do(flip1(.)) %>% ungroup() %>%
+          inner_join(x, by=c("UnitID", "Cond2")) %>%
+          select(-Cond2) %>% rename(Cond2=CondNew)
+  }
+
+  # generic: do one permutation run
+  do_once <- function(x, subjcond) {
+      clust <- permuteOnce1(x, subjcond) %>%
+          group_by(bin) %>% do(ttest1(.)) %>%
+          rename(F=tobs, p=pval) %>%
+          getClust()
+      return(abs(max(clust$csum)))
+  }
+
+  # get pvalues for each cluster
+  get_clustp <- function(orig, nhd) {
+      pval <- function(x) {
+          data_frame(p=sum(abs(c(x$csum, nhd))>=abs(x$csum))/(length(nhd)+1))
+      }
+      orig$p <- orig %>% rowwise() %>% do(pval(.)) %>% `[[`("p")
+      return(orig)
+  }
+#+END_SRC
+
+
+** Average of (CG+PG) versus control condition
+
+*** By Subject
+
+#+BEGIN_SRC R :var nmc=9999 :tangle scripts/cluster_random_grounded_vs_ungrounded_by_subject.R
+  library(dplyr)
+  library(tidyr)
+
+  <<binifysubj>>
+  <<clustfns>>
+
+  # compare unmentioned to critical
+  # do it by subject
+  dat_uvc <- dat_subj %>%
+      group_by(SubjID, Cond, bin, ID) %>%
+      summarize(Y=sum(Y)) %>% ungroup() %>%
+      spread(ID, Y) %>%
+      mutate(N=blnk+comp+negt+unme, comp_p=comp/N, unme_p=unme/N,
+              eff=log((unme_p + .5) / (comp_p + .5))) %>%
+      select(-blnk, -comp, -negt, -unme, -N)
+
+  dat_uvc2 <- dat_uvc %>%
+      mutate(Cond2=ifelse(Cond=="NG", "NG", "GD")) %>%
+      group_by(UnitID=SubjID, Cond2, bin) %>%
+      summarize(eff=mean(eff)) %>% ungroup() %>%
+      arrange(UnitID, bin, Cond2)
+
+  subjcond <- dat_uvc2 %>%
+      select(UnitID, Cond2) %>%
+      distinct()
+
+  clust_orig <- dat_uvc2 %>% group_by(bin) %>%
+      do(ttest1(.)) %>% rename(F=tobs, p=pval) %>%
+      getClust()
+
+  nhd <- replicate(nmc, do_once(dat_uvc2, subjcond))
+
+  clust_orig <- get_clustp(clust_orig, nhd)
+  print(clust_orig)
+
+  saveRDS(clust_orig, file="result/cluster_random_grounded_vs_ungrounded_by_subject.rds")
+#+END_SRC
+
+*** By Item
+
+#+BEGIN_SRC R :var nmc=9999 :tangle scripts/cluster_random_grounded_vs_ungrounded_by_item.R
+  library(dplyr)
+  library(tidyr)
+
+  <<binifyitem>>
+  <<clustfns>>
+
+  # compare unmentioned to critical
+  # do it by subject
+  dat_uvc <- dat_item %>%
+      group_by(ItemID, Cond, bin, ID) %>%
+      summarize(Y=sum(Y)) %>% ungroup() %>%
+      spread(ID, Y) %>%
+      mutate(N=blnk+comp+negt+unme, comp_p=comp/N, unme_p=unme/N,
+              eff=log((unme_p + .5) / (comp_p + .5))) %>%
+      select(-blnk, -comp, -negt, -unme, -N)
+
+  dat_uvc2 <- dat_uvc %>%
+      mutate(Cond2=ifelse(Cond=="NG", "NG", "GD")) %>%
+      group_by(UnitID=ItemID, Cond2, bin) %>%
+      summarize(eff=mean(eff)) %>% ungroup() %>%
+      arrange(UnitID, bin, Cond2)
+
+  itemcond <- dat_uvc2 %>%
+      select(UnitID, Cond2) %>%
+      distinct()
+
+  clust_orig <- dat_uvc2 %>% group_by(bin) %>%
+      do(ttest1(.)) %>% rename(F=tobs, p=pval) %>%
+      getClust()
+
+  nhd <- replicate(nmc, do_once(dat_uvc2, itemcond))
+
+  clust_orig <- get_clustp(clust_orig, nhd)
+  print(clust_orig)
+
+  saveRDS(clust_orig, file="result/cluster_random_grounded_vs_ungrounded_by_item.rds")
+#+END_SRC
+
+*** View Results
+
+#+BEGIN_SRC R 
+  library(dplyr) 
+
+  crg1 <- readRDS("result/cluster_random_grounded_vs_ungrounded_by_subject.rds") %>%
+      mutate(analysis="subject")
+  crg2 <- readRDS("result/cluster_random_grounded_vs_ungrounded_by_subject.rds") %>%
+      mutate(analysis="item")
+  crg <- rbind(crg1, crg2)
+  crg$from <- (crg$t0 - 1) * 50
+  crg$to <- (crg$t1 - 1) * 50
+  print(select(crg, analysis, csum, p, from, to))
+#+END_SRC
+
+#+RESULTS:
+|              csum |      p | from |   to |
+|-------------------+--------+------+------|
+| -4.67349865978301 |  0.253 |  150 |  200 |
+|   20.173972423547 | 0.0439 |  950 | 1250 |
+|  6.61669880567997 | 0.2024 | 2100 | 2200 |
+
+
+** Privileged ground versus common ground
+
+*** By Subject
+
+#+BEGIN_SRC R :var nmc=9999 :tangle scripts/cluster_random_common_vs_privileged_by_subject.R
+  library(dplyr)
+  library(tidyr)
+
+  <<binifysubj>>
+  <<clustfns>>
+
+  # compare unmentioned to critical
+  dat_pvc <- dat_subj %>% filter(Cond!="NG") %>%
+      group_by(UnitID=SubjID, Cond, bin, ID) %>%
+      summarize(Y=sum(Y)) %>% ungroup() %>%
+      spread(ID, Y) %>%
+      mutate(N=blnk+comp+negt+unme, comp_p=comp/N, unme_p=unme/N,
+      eff=log((unme_p + .5)/(comp_p + .5))) %>%
+      select(-blnk, -comp, -negt, -unme, -N)
+
+  dat_pvc2 <- dat_pvc %>%
+      mutate(Cond2=Cond) %>%
+      group_by(UnitID, Cond2, bin) %>%
+      summarize(eff=mean(eff)) %>% ungroup() %>%
+      arrange(UnitID, bin, Cond2)
+
+  subjcond <- dat_pvc2 %>%
+      select(UnitID, Cond2) %>%
+      distinct()
+
+  clust_orig <- dat_pvc2 %>% group_by(bin) %>%
+      do(ttest1(.)) %>% rename(F=tobs, p=pval) %>%
+      getClust()
+
+  nhd <- replicate(nmc, do_once(dat_pvc2, subjcond))
+
+  clust_orig <- get_clustp(clust_orig, nhd)
+  print(clust_orig)
+
+  saveRDS(clust_orig, file="result/cluster_random_common_vs_privileged_by_subject.rds")
+#+END_SRC
+
+*** By Item
+
+#+BEGIN_SRC R :var nmc=9999 :tangle scripts/cluster_random_common_vs_privileged_by_item.R
+  library(dplyr)
+  library(tidyr)
+
+  <<binifyitem>>
+  <<clustfns>>
+
+  # compare unmentioned to critical
+  dat_pvc <- dat_item %>% filter(Cond!="NG") %>%
+      group_by(UnitID=ItemID, Cond, bin, ID) %>%
+      summarize(Y=sum(Y)) %>% ungroup() %>%
+      spread(ID, Y) %>%
+      mutate(N=blnk+comp+negt+unme, comp_p=comp/N, unme_p=unme/N,
+      eff=log((unme_p + .5)/(comp_p + .5))) %>%
+      select(-blnk, -comp, -negt, -unme, -N)
+
+  dat_pvc2 <- dat_pvc %>%
+      mutate(Cond2=Cond) %>%
+      group_by(UnitID, Cond2, bin) %>%
+      summarize(eff=mean(eff)) %>% ungroup() %>%
+      arrange(UnitID, bin, Cond2)
+
+  itemcond <- dat_pvc2 %>%
+      select(UnitID, Cond2) %>%
+      distinct()
+
+  clust_orig <- dat_pvc2 %>% group_by(bin) %>%
+      do(ttest1(.)) %>% rename(F=tobs, p=pval) %>%
+      getClust()
+
+  nhd <- replicate(nmc, do_once(dat_pvc2, itemcond))
+
+  clust_orig <- get_clustp(clust_orig, nhd)
+  print(clust_orig)
+
+  saveRDS(clust_orig, file="result/cluster_random_common_vs_privileged_by_item.rds")
+#+END_SRC
+
+*** View Results
+
+#+BEGIN_SRC R 
+  library(dplyr) 
+
+  crc1 <- readRDS("result/cluster_random_common_vs_privileged_by_subject.rds") %>%
+      mutate(analysis="subject")
+  crc2 <- readRDS("result/cluster_random_common_vs_privileged_by_item.rds") %>%
+      mutate(analysis="item")
+  crc <- rbind(crc1, crc2)
+
+  crc$from <- (crc$t0 - 1) * 50
+  crc$to <- (crc$t1 - 1) * 50
+  print(select(crc, analysis, csum, p, from, to))
+#+END_SRC
+
+#+RESULTS:
+| analysis |             csum |    p | from |   to |
+|----------+------------------+------+------+------|
+| subject  | 58.2508101863728 | 0.02 | 1600 | 2500 |
+| item     | 83.3733108891259 | 0.01 | 1600 | 2500 |
+

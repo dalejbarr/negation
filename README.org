@@ -472,71 +472,80 @@ obsdat.glmer      15 500.26 561.28 -235.13   470.26 0.4333      1     0.5104
 
 * Plot Log Ratio
 
-#+HEADER: :file logratio.pdf :width 8 :height 4
+#+HEADER: :file logratio.pdf :width 8 :height 4.3
 #+BEGIN_SRC R :exports results :results output graphics
-  <<bootfns>>
+	<<bootfns>>
 
-  library(dplyr)
-  library(tidyr)
+	library(dplyr)
+	library(tidyr)
 
-  con <- src_sqlite("raw_data/Experiment_Data.db")
+	con <- src_sqlite("raw_data/Experiment_Data.db")
 
-  tdata <- tbl(con, "TrialData") %>% collect(n = Inf) %>%
-      select(RespID, SubjID, Cond)
+	tdata <- tbl(con, "TrialData") %>% collect(n = Inf) %>%
+			select(RespID, SubjID, Cond)
 
-  pog <- tbl(con, "POG_exproffset") %>% collect(n = Inf) %>%
-      filter(ms>0) %>%
-      mutate(bin=floor((ms+25)/50)*50)
+	pog <- tbl(con, "POG_exproffset") %>% collect(n = Inf) %>%
+			filter(ms>0) %>%
+			mutate(bin=floor((ms+25)/50)*50)
 
-  # the following lines divide the data into bins
-  # aggregated up to the Subject level
-  dat <- tdata %>% inner_join(pog, by="RespID") %>%
-      group_by(SubjID, Cond, bin, ID) %>%
-      summarize(Y=n()) %>%
-          right_join(expand(tdata %>%
-                                inner_join(pog, by="RespID"),
-                            SubjID, Cond, bin, ID))
-  dat$Y <- with(dat, ifelse(is.na(Y), 0, Y))
+	# the following lines divide the data into bins
+	# aggregated up to the Subject level
+	dat <- tdata %>% inner_join(pog, by="RespID") %>%
+			group_by(SubjID, Cond, bin, ID) %>%
+			summarize(Y=n()) %>%
+					right_join(expand(tdata %>%
+																inner_join(pog, by="RespID"),
+														SubjID, Cond, bin, ID),
+										 c("SubjID", "Cond", "bin", "ID"))
+	dat$Y <- with(dat, ifelse(is.na(Y), 0, Y))
 
-  dat_plot <- dat %>% group_by(SubjID, Cond, bin) %>%
-      summarize(N=sum(Y)) %>% ungroup() %>% inner_join(dat) %>%
-      mutate(p=ifelse(N==0, NA, Y/N)) %>%
-      filter(ID=="unme" | ID=="comp") %>%
-      select(SubjID, Cond, bin, Y, ID) %>%
-      spread(ID, Y) %>% mutate(`Log Ratio`=log((unme + .5) / (comp + .5)))
+	dat_plot <- dat %>%
+		group_by(SubjID, Cond, bin) %>%
+		summarize(N=sum(Y)) %>% ungroup() %>%
+		inner_join(dat, c("SubjID", "Cond", "bin")) %>%
+		mutate(p=ifelse(N==0, NA, Y/N)) %>%
+		filter(ID=="unme" | ID=="comp") %>%
+		select(SubjID, Cond, bin, Y, ID) %>%
+		spread(ID, Y) %>%
+		mutate(`Log Ratio`=log((unme + .5) / (comp + .5)))
 
-  subj <- dat_plot %>% select(SubjID) %>% distinct()
+	subj <- dat_plot %>% select(SubjID) %>% distinct()
 
-  # make sure that there are the same number of bins per condition per subject
-  if (dat_plot %>% group_by(SubjID, Cond) %>% 
-      summarize(n=n()) %>% ungroup() %>%
-      select(n) %>% distinct() %>% nrow() %>% `!=`(1)) {
-      stop("error: need to have same # bins per subject/cond")
-  } else {}
+	# make sure that there are the same number of bins per condition per subject
+	if (dat_plot %>% group_by(SubjID, Cond) %>% 
+			summarize(n=n()) %>% ungroup() %>%
+			select(n) %>% distinct() %>% nrow() %>% `!=`(1)) {
+			stop("error: need to have same # bins per subject/cond")
+	} else {}
 
-  boot.mx <- replicate(10000, dat_plot %>% boot_by_subject(subj) %>% aggup_lr())
-  boot.ci <- apply(boot.mx, 1, quantile, probs=c(.025, .975))
+	boot.mx <- replicate(10000, dat_plot %>% boot_by_subject(subj) %>% aggup_lr())
+	boot.ci <- apply(boot.mx, 1, quantile, probs=c(.025, .975))
 
-  dat_agg <- dat_plot %>% aggup_lr(TRUE)
-  dat_agg$pmin <- boot.ci["2.5%",]
-  dat_agg$pmax <- boot.ci["97.5%",]
+	dat_agg <- dat_plot %>% aggup_lr(TRUE)
+	dat_agg$pmin <- boot.ci["2.5%",]
+	dat_agg$pmax <- boot.ci["97.5%",]
 
-  cond_lookup <- data_frame(Cond=c("CG", "PG", "NG"),
-                            Condition=c("Common Ground", "Privileged Ground",
-                                "Control"))
+	cond_lookup <- data_frame(Cond=c("CG", "PG", "NG"),
+														Condition=c("One Speaker, Two Precedents",
+															"Two Speakers, Two Precedents",
+															"One Speaker, One Precedent"))
 
-  dat_agg2 <- dat_agg %>%
-      inner_join(cond_lookup) %>% select(-Cond) %>%
-      rename(`Time from Expression Offset (ms)`=bin)
+	dat_agg2 <- dat_agg %>%
+			inner_join(cond_lookup) %>% select(-Cond) %>%
+			rename(`Time from Expression Offset (ms)`=bin)
 
-  library(ggplot2)
-  ggplot(dat_agg2, aes(x=`Time from Expression Offset (ms)`,
-                       y=`Log Ratio`,
-                       colour=`Condition`)) + geom_line() + 
-                       geom_point(aes(shape=`Condition`)) +
-                       geom_ribbon(aes(ymin=pmin, ymax=pmax, fill=`Condition`),
-                                   alpha=.1, colour=NA) +                            
-                       theme(legend.position="top") 
+	library(ggplot2)
+	ggplot(dat_agg2, aes(x=`Time from Expression Offset (ms)`,
+											 y=`Log Ratio`,
+											 colour=`Condition`)) + geom_line() + 
+											 geom_point(aes(shape=`Condition`)) +
+											 geom_ribbon(aes(ymin=pmin, ymax=pmax, fill=`Condition`),
+																	 alpha=.1, colour=NA) +                            
+											 theme(legend.position="top") +
+											 guides(colour = guide_legend(title = NULL, nrow = 3),
+															shape = guide_legend(title = NULL, nrow = 3),
+															fill = guide_legend(title = NULL, nrow = 3))# +
+											 ## guide_legend(nrow = 3)
 #+END_SRC
 
 #+RESULTS:
